@@ -74,12 +74,30 @@ function Get-AdminsJSON
 function Get-PlayersJSON
 {
     $_PlayersJSON = @()
+    #$_PhillipJSON = @()
     ForEach ($_Player in $PlayerTable.keys)
     {
         [int64]$_lastEpoch = 0
         [string]$_latestDino = ""
         ForEach ($_Dino in $PlayerTable[$_Player].keys)
         {
+            #if ($_Player -eq "76561197960267552")
+            #{
+            #    $_PhillipJSON += @{
+            #        SteamID=$_Player
+            #        UpdateEpoch=$PlayerTable[$_Player][$_Dino]["UpdateEpoch"]
+            #        DinoSpecies=$_Dino
+            #        Coordinates="-1,-1"
+            #        Yaw="1"
+            #        HerdID="0123456789"
+            #        Growth=$PlayerTable[$_Player][$_Dino]["Growth"]
+            #        Health="100.0"
+            #        Stamina="100.0"
+            #        Hunger="100.0"
+            #        Thirst="100.0"
+            #    }
+            #       
+            #}
             # iterate through all dinos that the player has a savegame for, choose the latest one
             if ($_Dino -ne "Name")
             {
@@ -103,6 +121,7 @@ function Get-PlayersJSON
             Hunger="100.0"
             Thirst="100.0"
         }
+        #$_PhillipJSON | ConvertTo-Json -Depth 2 | Out-File "phillip.json"
     }
     return $_PlayersJSON
 }
@@ -295,30 +314,38 @@ function SendPlayerJSON
         $_PlayerJsonFile,
         $_ServerSecretFile
     )
-    [string]$_ServerSecret = Get-Content -Raw $_ServerSecretFile
-    $_ServerIdentity = Get-ServerIdentity $_ServerJsonFile
-    [string]$_ServerID = $_ServerIdentity["ServerID"]
-    $_headers = @{'X-TINav-ServerID' = $_ServerID; 'X-TINav-ServerSecretID' = $_ServerSecret}
-    $_URL="https://ti-nav.net/apis/server-push-api.php"
+    if ($stopWatch.Elapsed -ge $timeSpan)
+    {
+        Write-Host "Sending latest JSON to TI-Nav"
+        [string]$_ServerSecret = Get-Content -Raw $_ServerSecretFile
+        $_ServerIdentity = Get-ServerIdentity $_ServerJsonFile
+        [string]$_ServerID = $_ServerIdentity["ServerID"]
+        $_headers = @{'X-TINav-ServerID' = $_ServerID; 'X-TINav-ServerSecretID' = $_ServerSecret}
+        $_URL="https://ti-nav.net/apis/server-push-api.php"
 
-    $_content = Get-Content -Raw $_PlayerJsonFile
-    #$_content -replace "`n","" -replace "`r",""
-    try {
-        $_ServerRegistrationResponse = Invoke-WebRequest -Method 'POST' -ContentType 'application/json' -Headers $_headers -body $_content -Uri $_URL
-        $_ServerRegistrationResponseBody = $_ServerRegistrationResponse.Content
-        $_StatusCode = $_ServerRegistrationResponse.BaseResponse.StatusCode.Value__
+        $_content = Get-Content -Raw $_PlayerJsonFile
+        #$_content -replace "`n","" -replace "`r",""
+        try {
+            $_ServerRegistrationResponse = Invoke-WebRequest -Method 'POST' -ContentType 'application/json' -Headers $_headers -body $_content -Uri $_URL
+            $_ServerRegistrationResponseBody = $_ServerRegistrationResponse.Content
+            $_StatusCode = $_ServerRegistrationResponse.BaseResponse.StatusCode.Value__
 
+        }
+        catch [System.Net.WebException] {
+            $_ServerRegistrationResponseBody = $_
+            [int]$_StatusCode = $_.Exception.Response.StatusCode
+        }
+        # we do nothing for now - maybe some more exception handling would be good :)
+        Write-Host -NoNewline "HTTP Response ($_StatusCode): "
+        write-host $_ServerRegistrationResponseBody
+        $stopWatch.Reset()
+        $stopWatch.Start()
     }
-    catch [System.Net.WebException] {
-        $_ServerRegistrationResponseBody = $_
-        [int]$_StatusCode = $_.Exception.Response.StatusCode
-    }
-    # we do nothing for now - maybe some more exception handling would be good :)
-    Write-Host -NoNewline "HTTP Response ($_StatusCode): "
-    write-host $_ServerRegistrationResponseBody
 }
 
-# Main
+######################
+#       Main         #
+######################
 
 Store-ServerJSON $GameINI $ServerJsonFile
 While (!(CheckAPIAccess $ServerJsonFile $ServerSecretFile))
@@ -329,7 +356,7 @@ While (!(CheckAPIAccess $ServerJsonFile $ServerSecretFile))
     Clear-Host
 }
 
-# setup stop watch:
+# setup global stop watch - it will be accessed from the SendPlayerJSON function:
 $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
 $timeSpan = New-TimeSpan -Seconds 10
 $stopWatch.Start()
@@ -354,7 +381,7 @@ get-content $GameLOG -wait | % {
                         $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
                     }
                     # Do we have a Dino of this spezies for this player already - if not create one.
-                    $_Dino = $_array[14].Trim()
+                    $_Dino = "BP_"+$_array[14].Trim()+"_C"
                     if (!$PlayerTable[$_SteamID][$_Dino])
                     {
                         $PlayerTable[$_SteamID][$_Dino] = @{}
@@ -364,7 +391,7 @@ get-content $GameLOG -wait | % {
                     #$_Growth = [int]([decimal]$_array[16].Trim() * 100)
                     # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
                     $_Growth = [decimal]$_array[16].Trim()
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -lt $_Growth)
+                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
                     {
                         #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
                         #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
@@ -373,8 +400,8 @@ get-content $GameLOG -wait | % {
                         $_time = $_array[2].Trim().Replace(".",":")
                         $_msec = $_array[3].Trim()
                         $_DateTimeString = "$_date $_time.$_msec"
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
                         
+                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
                         $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[15].Trim()
                         $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
                         $PlayerTable[$_SteamID][$_Dino]["State"] = $_array[17].Trim()
@@ -382,6 +409,7 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
+                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
                     }
                 }
                 'Killed the following player' {
@@ -393,7 +421,7 @@ get-content $GameLOG -wait | % {
                         $PlayerTable[$_SteamID]["Name"] = $_array[19].Trim()
                     }
                     # Do we have a Dino of this spezies for this player already - if not create one.
-                    $_Dino = $_array[24].Trim()
+                    $_Dino = "BP_"+$_array[24].Trim()+"_C"
                     if (!$PlayerTable[$_SteamID][$_Dino])
                     {
                         $PlayerTable[$_SteamID][$_Dino] = @{}
@@ -403,7 +431,7 @@ get-content $GameLOG -wait | % {
                     #$_Growth = [int]([decimal]$_array[28].Trim() * 100)
                     # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
                     $_Growth = [decimal]$_array[28].Trim()
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -lt $_Growth)
+                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
                     {
                         #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
                         #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
@@ -421,6 +449,7 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
+                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
                     }
                 }
             }
@@ -440,7 +469,7 @@ get-content $GameLOG -wait | % {
                         $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
                     }
                     # Do we have a Dino of this spezies for this player already - if not create one.
-                    $_Dino = $_array[15].Trim()
+                    $_Dino = "BP_"+$_array[15].Trim()+"_C"
                     if (!$PlayerTable[$_SteamID][$_Dino])
                     {
                         $PlayerTable[$_SteamID][$_Dino] = @{}
@@ -450,7 +479,7 @@ get-content $GameLOG -wait | % {
                     #$_Growth = [int]([decimal]$_array[19].Trim() * 100)
                     # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
                     $_Growth = [decimal]$_array[19].Trim()
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -lt $_Growth)
+                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
                     {
                         #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
                         #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
@@ -468,16 +497,104 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
+                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                    }
+                }
+                'Save file found' {
+                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
+                    $_SteamID = $_array[12]
+                    if (!$PlayerTable[$_SteamID])
+                    {
+                        $PlayerTable[$_SteamID] = @{}
+                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
+                    }
+                    # Do we have a Dino of this spezies for this player already - if not create one.
+                    $_Dino = "BP_"+$_array[16].Trim()+"_C"
+                    if (!$PlayerTable[$_SteamID][$_Dino])
+                    {
+                        $PlayerTable[$_SteamID][$_Dino] = @{}
+                    }
+                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
+                    # Growth in %
+                    #$_Growth = [int]([decimal]$_array[20].Trim() * 100)
+                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
+                    $_Growth = [decimal]$_array[20].Trim()
+                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
+                    {
+                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
+                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
+                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
+                        $_date = $_array[1].Trim().Replace(".","/")
+                        $_time = $_array[2].Trim().Replace(".",":")
+                        $_msec = $_array[3].Trim()
+                        $_DateTimeString = "$_date $_time.$_msec"
+
+                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
+                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[18].Trim()
+                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
+                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
+                        #Display-PlayerTable $PlayerTable
+                        #Display-Player $PlayerTable[$_SteamID]
+                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
+                        Store-PlayerJSON $PlayersJsonFile
+                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
                     }
                 }
             }
         }
-    }
-    if ($stopWatch.Elapsed -ge $timeSpan)
-    {
-        Write-Host "Sending latest JSON to TI-Nav"
-        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-        $stopWatch.Reset()
-        $stopWatch.Start()
+        'LogTheIsleCharacter' {
+            $_logline = $_ -replace "[-,:\[\]]",'|'
+            $_array = $_logline.split('|')
+            # output the arry with index numbers - so we can choose the correct items
+            #for($i=0;$i -le $_array.length-1;$i++)
+            #{
+            #    write-host $i ":" $_array[$i]
+            #}
+            #exit
+            $_event = $_array[20].Trim()
+            switch ($_event)
+            {
+                'Used Ability' {
+                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
+                    $_SteamID = $_array[12]
+                    if (!$PlayerTable[$_SteamID])
+                    {
+                        $PlayerTable[$_SteamID] = @{}
+                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
+                    }
+                    # Do we have a Dino of this spezies for this player already - if not create one.
+                    $_Dino = "BP_"+$_array[15].Trim()+"_C"
+                    if (!$PlayerTable[$_SteamID][$_Dino])
+                    {
+                        $PlayerTable[$_SteamID][$_Dino] = @{}
+                    }
+                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
+                    # Growth in %
+                    #$_Growth = [int]([decimal]$_array[19].Trim() * 100)
+                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
+                    $_Growth = [decimal]$_array[19].Trim()
+                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
+                    {
+                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
+                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
+                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
+                        $_date = $_array[1].Trim().Replace(".","/")
+                        $_time = $_array[2].Trim().Replace(".",":")
+                        $_msec = $_array[3].Trim()
+                        $_DateTimeString = "$_date $_time.$_msec"
+
+                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
+                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[17].Trim()
+                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
+                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
+                        #Display-PlayerTable $PlayerTable
+                        #Display-Player $PlayerTable[$_SteamID]
+                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
+                        Store-PlayerJSON $PlayersJsonFile
+                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                    }
+                }
+            }
+        }
     }
 }
