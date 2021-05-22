@@ -108,6 +108,7 @@ function Get-PlayersJSON
                 }
             }
         }
+        # known bug: if there is only one player: powershell will not properly follow what we want here (add a hash table to an array) but just create a hashtable - or this is messed up by the ConvertTo-Json which will later try to transform this into proper JSON...
         $_PlayersJSON += @{
             SteamID=$_Player
             UpdateEpoch=$PlayerTable[$_Player][$_latestDino]["UpdateEpoch"]
@@ -314,8 +315,9 @@ function SendPlayerJSON
         $_PlayerJsonFile,
         $_ServerSecretFile
     )
-    if ($stopWatch.Elapsed -ge $timeSpan)
-    {
+    # no more stopwatch checking - we can afford to send player data for every one of the captured events.
+    #if ($stopWatch.Elapsed -ge $timeSpan)
+    #{
         Write-Host "Sending latest JSON to TI-Nav"
         [string]$_ServerSecret = Get-Content -Raw $_ServerSecretFile
         $_ServerIdentity = Get-ServerIdentity $_ServerJsonFile
@@ -338,9 +340,9 @@ function SendPlayerJSON
         # we do nothing for now - maybe some more exception handling would be good :)
         Write-Host -NoNewline "HTTP Response ($_StatusCode): "
         write-host $_ServerRegistrationResponseBody
-        $stopWatch.Reset()
-        $stopWatch.Start()
-    }
+        #$stopWatch.Reset()
+        #$stopWatch.Start()
+    #}
 }
 
 ######################
@@ -357,9 +359,9 @@ While (!(CheckAPIAccess $ServerJsonFile $ServerSecretFile))
 }
 
 # setup global stop watch - it will be accessed from the SendPlayerJSON function:
-$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
-$timeSpan = New-TimeSpan -Seconds 10
-$stopWatch.Start()
+#$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+#$timeSpan = New-TimeSpan -Seconds 10
+#$stopWatch.Start()
 
 $PlayerTable = @{}
 # just 100 lines for testing & debugging
@@ -409,7 +411,14 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
-                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        # only send if the current log entries' timestamp is close to current time (otherwise this is crawling old logs which don't have to be send)
+                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
+                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
+                        write-host -NoNewline ";"
+                        if ($__timediff -eq 0)
+                        {
+                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        }
                     }
                 }
                 'Killed the following player' {
@@ -449,7 +458,13 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
-                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
+                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
+                        write-host -NoNewline ":"
+                        if ($__timediff -eq 0)
+                        {
+                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        }
                     }
                 }
             }
@@ -497,10 +512,22 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
-                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
+                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
+                        write-host -NoNewline "-"
+                        if ($__timediff -eq 0)
+                        {
+                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        }
                     }
                 }
-                'Save file found' {
+                'Joined The Server. Save file found Dino' {
+            # output the arry with index numbers - so we can choose the correct items
+            #for($i=0;$i -le $_array.length-1;$i++)
+            #{
+            #    write-host $i ":" $_array[$i]
+            #}
+            #exit
                     # Do we have a table entry for this SteamID already - if not create one and set Playername.
                     $_SteamID = $_array[12]
                     if (!$PlayerTable[$_SteamID])
@@ -509,7 +536,7 @@ get-content $GameLOG -wait | % {
                         $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
                     }
                     # Do we have a Dino of this spezies for this player already - if not create one.
-                    $_Dino = "BP_"+$_array[16].Trim()+"_C"
+                    $_Dino = "BP_"+$_array[14].Trim()+"_C"
                     if (!$PlayerTable[$_SteamID][$_Dino])
                     {
                         $PlayerTable[$_SteamID][$_Dino] = @{}
@@ -518,7 +545,7 @@ get-content $GameLOG -wait | % {
                     # Growth in %
                     #$_Growth = [int]([decimal]$_array[20].Trim() * 100)
                     # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[20].Trim()
+                    $_Growth = [decimal]$_array[18].Trim()
                     if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
                     {
                         #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
@@ -530,14 +557,20 @@ get-content $GameLOG -wait | % {
                         $_DateTimeString = "$_date $_time.$_msec"
 
                         $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[18].Trim()
+                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[16].Trim()
                         $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
                         $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
                         #Display-PlayerTable $PlayerTable
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
-                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
+                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
+                        write-host -NoNewline ","
+                        if ($__timediff -eq 0)
+                        {
+                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        }
                     }
                 }
             }
@@ -551,10 +584,10 @@ get-content $GameLOG -wait | % {
             #    write-host $i ":" $_array[$i]
             #}
             #exit
-            $_event = $_array[20].Trim()
+            $_event = $_array[22].Trim()
             switch ($_event)
             {
-                'Used Ability' {
+                'Rest' {
                     # Do we have a table entry for this SteamID already - if not create one and set Playername.
                     $_SteamID = $_array[12]
                     if (!$PlayerTable[$_SteamID])
@@ -591,7 +624,13 @@ get-content $GameLOG -wait | % {
                         #Display-Player $PlayerTable[$_SteamID]
                         #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
                         Store-PlayerJSON $PlayersJsonFile
-                        SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
+                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
+                        write-host -NoNewline "_"
+                        if ($__timediff -eq 0)
+                        {
+                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+                        }
                     }
                 }
             }
