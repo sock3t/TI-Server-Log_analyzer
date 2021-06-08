@@ -138,9 +138,9 @@ function Store-PlayerJSON
     Param(
         $_PlayerJsonFile
     )
-    $_PlayerJSON = @{Admins=Get-AdminsJSON; Players=Get-PlayersJSON}
+    $_PlayerJSON = @{Admins=@(Get-AdminsJSON); Players=@(Get-PlayersJSON)}
     # test output of JSON - the ConvertTo-Json needs a depth parameter to cover all subelements of the hashtable - we could just set this to 9999 to catch everything ever.
-    $_PlayerJSON | ConvertTo-Json -Depth 2 | Out-File $_PlayerJsonFile
+    ConvertTo-Json -Depth 2 $_PlayerJSON | Out-File $_PlayerJsonFile
 }
 
 function Get-ServerIdentity
@@ -177,7 +177,7 @@ function Store-ServerJSON
     $_ServerID = Get-FileHash -Algorithm MD5 -InputStream $stringAsStream | %{$_.Hash.SubString(0,6)}
     # <<
     $_ServerJSON = @{ServerID=$_ServerID; ServerName=$_ServerName; ServerMap="Isla_Spiro"}
-    $_ServerJSON | ConvertTo-Json -Depth 2 | Out-File $_ServerJsonFile
+    ConvertTo-Json -Depth 2 $_ServerJSON | Out-File $_ServerJsonFile
 }
 
 function CheckAPIAccess
@@ -324,7 +324,7 @@ function SendPlayerJSON
     # no more stopwatch checking - we can afford to send player data for every one of the captured events.
     #if ($stopWatch.Elapsed -ge $timeSpan)
     #{
-        Write-Host -NoNewline " | Sending latest JSON to TI-Nav | "
+        #Write-Host -NoNewline " | Sending latest JSON to TI-Nav | "
         [string]$_ServerSecret = Get-Content -Raw $_ServerSecretFile
         $_ServerIdentity = Get-ServerIdentity $_ServerJsonFile
         [string]$_ServerID = $_ServerIdentity["ServerID"]
@@ -334,24 +334,31 @@ function SendPlayerJSON
         $_content = Get-Content -Raw $_PlayerJsonFile
         #$_content -replace "`n","" -replace "`r",""
         try {
-            $_ServerRegistrationResponse = Invoke-WebRequest -Method 'POST' -ContentType 'application/json' -Headers $_headers -body $_content -Uri $_URL
-            $_ServerRegistrationResponseBody = $_ServerRegistrationResponse.Content
-            $_StatusCode = $_ServerRegistrationResponse.BaseResponse.StatusCode.Value__
+            $_PlayerJsonUpdateResponse = Invoke-WebRequest -Method 'POST' -ContentType 'application/json' -Headers $_headers -body $_content -Uri $_URL
+            $_PlayerJsonUpdateResponseBody = $_PlayerJsonUpdateResponse.Content
+            $_StatusCode = $_PlayerJsonUpdateResponse.BaseResponse.StatusCode.Value__
 
         }
         catch [System.Net.WebException] {
-            $_ServerRegistrationResponseBody = $_
+            $_PlayerJsonUpdateResponseBody = $_
             [int]$_StatusCode = $_.Exception.Response.StatusCode
         }
         # we do nothing for now - maybe some more exception handling would be good :)
-        Write-Host -NoNewline "HTTP Response ($_StatusCode)"
-        if ( -not ([string]::IsNullOrEmpty($_ServerRegistrationResponseBody)))
+        if ($_StatusCode -ne 200)
         {
-            write-host ": $_ServerRegistrationResponseBody"
+            Write-Host -NoNewline "HTTP Response ($_StatusCode)"
+            if ( -not ([string]::IsNullOrEmpty($_PlayerJsonUpdateResponseBody)))
+            {
+                write-host ": $_PlayerJsonUpdateResponseBody"
+            }
+            else
+            {
+                write-host ": empty response body"
+            }
         }
         else
         {
-            write-host ""
+            Write-Host -NoNewline " ! "
         }
         #$stopWatch.Reset()
         #$stopWatch.Start()
@@ -397,15 +404,39 @@ function processLogLine
     #Display-PlayerTable $PlayerTable
     #Display-Player $PlayerTable[$_SteamID]
     #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-    Store-PlayerJSON $PlayersJsonFile
+    write-host -NoNewline "$__eventType"
+
+    # let's turn sending the json from here off for now - we want to send events much more frequently
+    <#
     # only send if the current log entries' timestamp is close to current time (otherwise this is crawling old logs which don't have to be send)
     $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
     $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-    write-host -NoNewline "$__eventType"
     if ($__timediff -eq 0)
     {
         SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
     }
+    #>
+}
+
+function removePlayerfromArray
+{
+    Param(
+        $__SteamID
+    )
+    $PlayerTable.Remove($__SteamID)
+}
+
+function outputArray
+{
+    Param(
+        $__array
+    )
+    # output the arry with index numbers - so we can choose the correct items
+    for($i=0;$i -le $__array.length-1;$i++)
+    {
+        write-host $i ":" $__array[$i]
+    }
+    exit
 }
 
 ######################
@@ -422,397 +453,71 @@ While (!(CheckAPIAccess $ServerJsonFile $ServerSecretFile))
 }
 
 # setup global stop watch - it will be accessed from the SendPlayerJSON function:
-#$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
-#$timeSpan = New-TimeSpan -Seconds 10
-#$stopWatch.Start()
+$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+$timeSpan = New-TimeSpan -Seconds 10
+$stopWatch.Start()
 
 $PlayerTable = @{}
 # just 100 lines for testing & debugging
 # we don't have to parse the entire log file, yet this can help to bulk load from older log files etc. So we keep it this way.
 #get-content $GameLOG -wait -tail 100 | % {
 get-content $GameLOG -wait | % {
-    switch -regex ($_)
+    $_logline = $_ -replace "[-,:\[\]]",'|'
+    $_array = $_logline.split('|')
+    if ($_array.Count -ge 6 -and $_array[6])
     {
-        'LogTheIsleKillData' {
-            $_logline = $_ -replace "[-,:\[\]]",'|'
-            $_array = $_logline.split('|')
-            switch ($_array[17].Trim())
-            {
-                'Died from Natural cause' {
-                    # processLogLine $__date, $__time, $__msec, $__PlayerName, $__SteamID, $__Dino, $__Gender, $__Growth, $__State, $__eventType
-                    processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[14] $_array[15] $_array[16] $_array[17] ";"
-                    <#
-                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
-                    $_SteamID = $_array[12]
-                    if (!$PlayerTable[$_SteamID])
-                    {
-                        $PlayerTable[$_SteamID] = @{}
-                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
+        #outputArray $_array
+        $_mainEvent = $_array[6].Trim()
+        switch -regex ($_mainEvent)
+        {
+            'LogTheIsleKillData' {
+                $_subEvent = $_array[17].Trim()
+                switch ($_subEvent)
+                {
+                    'Died from Natural cause' {
+                        #outputArray $_array
+                        # processLogLine $__date, $__time, $__msec, $__PlayerName, $__SteamID, $__Dino, $__Gender, $__Growth, $__State, $__eventType
+                        processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[14] $_array[15] $_array[16] $_subEvent "_"
                     }
-                    # Do we have a Dino of this spezies for this player already - if not create one.
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    $_Dino = "BP_"+$_array[14].Trim()+"_C"
-                    
-                    if (!$PlayerTable[$_SteamID][$_Dino])
-                    {
-                        $PlayerTable[$_SteamID][$_Dino] = @{}
+                    'Killed the following player' {
+                        $__state = "Killed by " + $_array[12].Trim()
+                        #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
+                        processLogLine $_array[1] $_array[2] $_array[3] $_array[19] $_array[21] $_array[24] $_array[26] $_array[28] $__state "+"
                     }
-                    
-                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    # Growth in %
-                    #$_Growth = [int]([decimal]$_array[16].Trim() * 100)
-                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[16].Trim()
-                    
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
-                    {
-                    
-                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
-                        $_date = $_array[1].Trim().Replace(".","/")
-                        $_time = $_array[2].Trim().Replace(".",":")
-                        $_msec = $_array[3].Trim()
-                        $_DateTimeString = "$_date $_time.$_msec"
-                        
-                        <#
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[15].Trim()
-                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_array[17].Trim()
-                        
-                        # no more array for each Dino, just the current
-                        $PlayerTable[$_SteamID]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID]["Gender"] = $_array[15].Trim()
-                        $PlayerTable[$_SteamID]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID]["State"] = $_array[17].Trim()
-                        $PlayerTable[$_SteamID]["DinoSpecies"] = $_Dino
-                        #Display-PlayerTable $PlayerTable
-                        #Display-Player $PlayerTable[$_SteamID]
-                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-                        Store-PlayerJSON $PlayersJsonFile
-                        # only send if the current log entries' timestamp is close to current time (otherwise this is crawling old logs which don't have to be send)
-                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
-                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-                        write-host -NoNewline ";"
-                        if ($__timediff -eq 0)
-                        {
-                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-                        }
-                    <#
-                    }
-                    
-                    #>
                 }
-                'Killed the following player' {
-                    #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
-                    processLogLine $_array[1] $_array[2] $_array[3] $_array[19] $_array[21] $_array[24] $_array[26] $_array[28] "Killed by " + $_array[12].Trim() ":"
-
-                    <#
-                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
-                    $_SteamID = $_array[21]
-                    if (!$PlayerTable[$_SteamID])
-                    {
-                        $PlayerTable[$_SteamID] = @{}
-                        $PlayerTable[$_SteamID]["Name"] = $_array[19].Trim()
+            }
+            'LogTheIsleJoinData' {
+                $_subEvent = $_array[13].Trim()
+                switch ($_subEvent)
+                {
+                    'Left The Server' {
+                        #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
+                        processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[15] $_array[17] $_array[19] $_subEvent "°"
+                        removePlayerfromArray $_array[12]
                     }
-                    # Do we have a Dino of this spezies for this player already - if not create one.
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    $_Dino = "BP_"+$_array[24].Trim()+"_C"
-
-                    <#
-                    if (!$PlayerTable[$_SteamID][$_Dino])
-                    {
-                        $PlayerTable[$_SteamID][$_Dino] = @{}
+                    'Joined The Server. Save file found Dino' {
+                        #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
+                        processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[14] $_array[16] $_array[18] $_subEvent "^"
                     }
-                    
-
-                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    # Growth in %
-                    #$_Growth = [int]([decimal]$_array[28].Trim() * 100)
-                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[28].Trim()
-
-                    <#
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
-                    {
-                    
-
-                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
-                        $_date = $_array[1].Trim().Replace(".","/")
-                        $_time = $_array[2].Trim().Replace(".",":")
-                        $_msec = $_array[3].Trim()
-                        $_DateTimeString = "$_date $_time.$_msec"
-
-                        <#
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[26].Trim()
-                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID][$_Dino]["State"] = "Killed by " + $_SteamID.Trim()
-                        
-                        # no more array for each Dino, just the current
-                        $PlayerTable[$_SteamID]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID]["Gender"] = $_array[26].Trim()
-                        $PlayerTable[$_SteamID]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID]["State"] = "Killed by " + $_array[12].Trim()
-                        $PlayerTable[$_SteamID]["DinoSpecies"] = $_Dino
-                        #Display-PlayerTable $PlayerTable
-                        #Display-Player $PlayerTable[$_SteamID]
-                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-                        Store-PlayerJSON $PlayersJsonFile
-                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
-                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-                        write-host -NoNewline ":"
-                        if ($__timediff -eq 0)
-                        {
-                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-                        }
-                    <#
-                    }
-                    #>
                 }
+            }
+            'LogTheIsleCharacter' {
+                $_subEvent = $_array[22].Trim()
+                #switch -regex ($_subEvent)
+                #{
+                #    '(Rest|Bite|Wallow|PickUp|PrimaryAttack|VoiceBroadcast|VoiceFriendly|VoiceThreaten|VoiceHelp|Vocalize|SecondaryAttack|SecondaryAttack.UtahPounce|SecondaryAttack.DeinoLunge)' {
+                        #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
+                        processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[15] $_array[17] $_array[19] $_subEvent "."
+                #    }
+                #}
             }
         }
-        'LogTheIsleJoinData' {
-            $_logline = $_ -replace "[-,:\[\]]",'|'
-            $_array = $_logline.split('|')
-            $_event = $_array[13].Trim()
-            switch ($_event)
-            {
-                'Left The Server' {
-                    #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
-                    processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[15] $_array[17] $_array[19] $_event "-"
-
-                    <#
-                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
-                    $_SteamID = $_array[12]
-                    if (!$PlayerTable[$_SteamID])
-                    {
-                        $PlayerTable[$_SteamID] = @{}
-                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
-                    }
-                    # Do we have a Dino of this spezies for this player already - if not create one.
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    $_Dino = "BP_"+$_array[15].Trim()+"_C"
-
-                    <#
-                    if (!$PlayerTable[$_SteamID][$_Dino])
-                    {
-                        $PlayerTable[$_SteamID][$_Dino] = @{}
-                    }
-                    
-
-                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    # Growth in %
-                    #$_Growth = [int]([decimal]$_array[19].Trim() * 100)
-                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[19].Trim()
-
-                    <#
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
-                    {
-                    
-                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
-                        $_date = $_array[1].Trim().Replace(".","/")
-                        $_time = $_array[2].Trim().Replace(".",":")
-                        $_msec = $_array[3].Trim()
-                        $_DateTimeString = "$_date $_time.$_msec"
-
-                        <#
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[17].Trim()
-                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
-                        
-                        # no more array for each Dino, just the current
-                        $PlayerTable[$_SteamID]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID]["Gender"] = $_array[17].Trim()
-                        $PlayerTable[$_SteamID]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID]["State"] = $_event
-                        $PlayerTable[$_SteamID]["DinoSpecies"] = $_Dino
-                        #Display-PlayerTable $PlayerTable
-                        #Display-Player $PlayerTable[$_SteamID]
-                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-                        Store-PlayerJSON $PlayersJsonFile
-                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
-                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-                        write-host -NoNewline "-"
-                        if ($__timediff -eq 0)
-                        {
-                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-                        }
-                    <#
-                    }
-                    #>
-                }
-                'Joined The Server. Save file found Dino' {
-                    #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
-                    processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[14] $_array[16] $_array[18] $_event ","
-                    # output the arry with index numbers - so we can choose the correct items
-                    #for($i=0;$i -le $_array.length-1;$i++)
-                    #{
-                    #    write-host $i ":" $_array[$i]
-                    #}
-                    #exit
-
-                    <#
-                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
-                    $_SteamID = $_array[12]
-                    if (!$PlayerTable[$_SteamID])
-                    {
-                        $PlayerTable[$_SteamID] = @{}
-                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
-                    }
-                    # Do we have a Dino of this spezies for this player already - if not create one.
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    $_Dino = "BP_"+$_array[14].Trim()+"_C"
-
-                    <#
-                    if (!$PlayerTable[$_SteamID][$_Dino])
-                    {
-                        $PlayerTable[$_SteamID][$_Dino] = @{}
-                    }
-                    
-
-                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    # Growth in %
-                    #$_Growth = [int]([decimal]$_array[20].Trim() * 100)
-                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[18].Trim()
-
-                    <#
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
-                    {
-                    
-
-                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
-                        $_date = $_array[1].Trim().Replace(".","/")
-                        $_time = $_array[2].Trim().Replace(".",":")
-                        $_msec = $_array[3].Trim()
-                        $_DateTimeString = "$_date $_time.$_msec"
-
-                        <#
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[16].Trim()
-                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
-                        
-                        # no more array for each Dino, just the current
-                        $PlayerTable[$_SteamID]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID]["Gender"] = $_array[16].Trim()
-                        $PlayerTable[$_SteamID]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID]["State"] = $_event
-                        $PlayerTable[$_SteamID]["DinoSpecies"] = $_Dino
-                        #Display-PlayerTable $PlayerTable
-                        #Display-Player $PlayerTable[$_SteamID]
-                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-                        Store-PlayerJSON $PlayersJsonFile
-                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
-                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-                        write-host -NoNewline ","
-                        if ($__timediff -eq 0)
-                        {
-                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-                        }
-                    <#
-                    }
-                    #>
-                }
-            }
-        }
-        'LogTheIsleCharacter' {
-            $_logline = $_ -replace "[-,:\[\]]",'|'
-            $_array = $_logline.split('|')
-            # output the arry with index numbers - so we can choose the correct items
-            #for($i=0;$i -le $_array.length-1;$i++)
-            #{
-            #    write-host $i ":" $_array[$i]
-            #}
-            #exit
-            $_event = $_array[22].Trim()
-            switch ($_event)
-            {
-                'Rest' {
-                    #processLogLine $__date $__time $__msec $__PlayerName $__SteamID $__Dino $__Gender $__Growth $__State $__eventType
-                    processLogLine $_array[1] $_array[2] $_array[3] $_array[11] $_array[12] $_array[15] $_array[17] $_array[19] $_event "_"
-
-                    <#
-                    # Do we have a table entry for this SteamID already - if not create one and set Playername.
-                    $_SteamID = $_array[12]
-                    if (!$PlayerTable[$_SteamID])
-                    {
-                        $PlayerTable[$_SteamID] = @{}
-                        $PlayerTable[$_SteamID]["Name"] = $_array[11].Trim()
-                    }
-                    # Do we have a Dino of this spezies for this player already - if not create one.
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    $_Dino = "BP_"+$_array[15].Trim()+"_C"
-
-                    <#
-                    if (!$PlayerTable[$_SteamID][$_Dino])
-                    {
-                        $PlayerTable[$_SteamID][$_Dino] = @{}
-                    }
-                    
-
-                    # Does the player have already the same dino with larger growth - then prevent overwriting the progress/state for this one
-                    # This becomes obsolete now - we do this on the server side again. So no more growth comparison, no need to store an array of all Dinos a player played so far. Just send the latest state.
-                    # Growth in %
-                    #$_Growth = [int]([decimal]$_array[19].Trim() * 100)
-                    # growth in decimal notation - likely more convenient for copy&paste into the in-game UI
-                    $_Growth = [decimal]$_array[19].Trim()
-
-                    <#
-                    if ($PlayerTable[$_SteamID][$_Dino]["Growth"] -le $_Growth)
-                    {
-                    
-
-                        #$PlayerTable[$_SteamID][$_Dino]["Date"] = $_array[1].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["Time"] = $_array[2].Trim()
-                        #$PlayerTable[$_SteamID][$_Dino]["msec"] = $_array[3].Trim()
-                        $_date = $_array[1].Trim().Replace(".","/")
-                        $_time = $_array[2].Trim().Replace(".",":")
-                        $_msec = $_array[3].Trim()
-                        $_DateTimeString = "$_date $_time.$_msec"
-
-                        <#
-                        $PlayerTable[$_SteamID][$_Dino]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID][$_Dino]["Gender"] = $_array[17].Trim()
-                        $PlayerTable[$_SteamID][$_Dino]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID][$_Dino]["State"] = $_event
-                        
-                        # no more array for each Dino, just the current
-                        $PlayerTable[$_SteamID]["UpdateEpoch"] = [int64](New-TimeSpan -Start $(Get-Date -Date "01/01/1970") -End $_DateTimeString).TotalMilliseconds
-                        $PlayerTable[$_SteamID]["Gender"] = $_array[17].Trim()
-                        $PlayerTable[$_SteamID]["Growth"] = $_Growth
-                        $PlayerTable[$_SteamID]["State"] = $_event
-                        $PlayerTable[$_SteamID]["DinoSpecies"] = $_Dino
-                        #Display-PlayerTable $PlayerTable
-                        #Display-Player $PlayerTable[$_SteamID]
-                        #Display-Dino $_Dino $PlayerTable[$_SteamID][$_Dino] $PlayerTable[$_SteamID]["Name"] $_SteamID
-                        Store-PlayerJSON $PlayersJsonFile
-                        $__currdate = [System.TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::Now,"UTC")
-                        $__timediff = [int64](New-TimeSpan -Start $_DateTimeString -End $__currdate).TotalMinutes
-                        write-host -NoNewline "_"
-                        if ($__timediff -eq 0)
-                        {
-                            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
-                        }
-                    <#
-                    }
-                    #>
-                }
-            }
+        if (($PlayerTable.Count -ne 0) -and ($stopWatch.Elapsed -ge $timeSpan))
+        {
+            Store-PlayerJSON $PlayersJsonFile
+            SendPlayerJSON $ServerJsonFile $PlayersJsonFile $ServerSecretFile
+            $stopWatch.Reset()
+            $stopWatch.Start()
         }
     }
 }
